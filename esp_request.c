@@ -25,19 +25,6 @@
 
 #define REQ_CHECK(check, log, ret) if(check) {ESP_LOGE(REQ_TAG, log);ret;}
 
-static int resolve_dns(const char *host, struct sockaddr_in *ip) {
-    struct hostent *he;
-    struct in_addr **addr_list;
-    he = gethostbyname(host);
-    if(he == NULL)
-        return -1;
-    addr_list = (struct in_addr **)he->h_addr_list;
-    if(addr_list[0] == NULL)
-        return -1;
-    ip->sin_family = AF_INET;
-    memcpy(&ip->sin_addr, addr_list[0], sizeof(ip->sin_addr));
-    return 0;
-}
 
 static char *http_auth_basic_encode(const char *username, const char *password)
 {
@@ -48,29 +35,31 @@ static char *http_auth_basic_encode(const char *username, const char *password)
 static int nossl_connect(request_t *req)
 {
     int socket;
-    struct sockaddr_in remote_ip;
+    struct addrinfo hints;
+    struct addrinfo *result;
+    struct sockaddr_in *addr;
     struct timeval tv;
     req_list_t *host, *port, *timeout;
-    bzero(&remote_ip, sizeof(struct sockaddr_in));
-    //if stream_host is not ip address, resolve it AF_INET,servername,&serveraddr.sin_addr
+    bzero(&hints, sizeof(struct addrinfo));
+
     host = req_list_get_key(req->opt, "host");
     REQ_CHECK(host == NULL, "host = NULL", return -1);
+    port = req_list_get_key(req->opt, "port");
+    REQ_CHECK(port == NULL, "port = NULL", return -1);
 
-    if(inet_pton(AF_INET, (const char*)host->value, &remote_ip.sin_addr) != 1) {
-        if(resolve_dns((const char*)host->value, &remote_ip) < 0) {
-            return -1;
-        }
+    hints.ai_family = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
+    hints.ai_socktype = SOCK_STREAM; /* Datagram socket */
+    hints.ai_flags = 0;
+    hints.ai_protocol = 0;          /* Any protocol */
+
+    int s = getaddrinfo(host->value, port->value, &hints, &result);
+    if (s != 0) {
+        ESP_LOGI(REQ_TAG, "getaddrinfo: %i\n", s); // seems like lwIP does not have gai_strerror(s)
+        return -1;
     }
 
-    socket = socket(PF_INET, SOCK_STREAM, 0);
+    socket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     REQ_CHECK(socket < 0, "socket failed", return -1);
-
-    port = req_list_get_key(req->opt, "port");
-    if(port == NULL)
-        return -1;
-
-    remote_ip.sin_family = AF_INET;
-    remote_ip.sin_port = htons(atoi(port->value));
 
     tv.tv_sec = 10; //default timeout is 10 seconds
     timeout = req_list_get_key(req->opt, "timeout");
@@ -80,14 +69,22 @@ static int nossl_connect(request_t *req)
     tv.tv_usec = 0;
     setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    ESP_LOGD(REQ_TAG, "[sock=%d],connecting to server IP:%s,Port:%s...",
-             socket, ipaddr_ntoa((const ip_addr_t*)&remote_ip.sin_addr.s_addr), (char*)port->value);
-    if(connect(socket, (struct sockaddr *)(&remote_ip), sizeof(struct sockaddr)) != 0) {
+//    addr = (struct sockaddr_in *)result->ai_addr;
+    // FIXME
+//    ESP_LOGD(REQ_TAG, "about to call ipaddr_ntoa");
+//    char buf[128] = ipaddr_ntoa((const ip_addr_t*) addr->sin_addr.s_addr);
+//    ESP_LOGD(REQ_TAG, "call to ipaddr_ntoa succeeded");
+//    ESP_LOGD(REQ_TAG, "[sock=%d],connecting to server IP:%s,Port:%s...", socket, buf, (char*)port->value);
+    if(connect(socket, result->ai_addr, result->ai_addrlen) != 0) {
+    	ESP_LOGD(REQ_TAG, "Failed to connect()");
+        freeaddrinfo(result);
         close(socket);
         req->socket = -1;
         return -1;
     }
     req->socket = socket;
+    freeaddrinfo(result);
+    
     return socket;
 }
 static int ssl_connect(request_t *req)
