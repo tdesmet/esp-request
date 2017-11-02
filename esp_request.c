@@ -91,12 +91,15 @@ static int ssl_connect(request_t *req)
 {
     nossl_connect(req);
     REQ_CHECK(req->socket < 0, "socket failed", return -1);
+    req_list_t *host;
+    host = req_list_get_key(req->opt, "host");
 
-    //TODO: Check
-    req->ctx = SSL_CTX_new(TLSv1_1_client_method());
+    //FIXME: Add certificate validaton!
+    req->ctx = SSL_CTX_new(TLSv1_2_client_method());
     req->ssl = SSL_new(req->ctx);
     SSL_set_fd(req->ssl, req->socket);
-    SSL_connect(req->ssl);
+    SSL_set_tlsext_host_name(req->ssl, host->value);
+    ESP_LOGD(REQ_TAG, "ssl_connect done: %i", SSL_connect(req->ssl));
     return 0;
 }
 static char *ws_esc(char *buffer, int len, int *outlen)
@@ -170,14 +173,18 @@ static int ws_unesc(unsigned char *ws_buffer, unsigned char *buffer, int len)
 
 static int ssl_write(request_t *req, char *buffer, int len)
 {
+	int ret;
     if(req->valid_websocket) {
         int ws_len = 0;
         char *ws_buffer = ws_esc(buffer, len, &ws_len);
-        SSL_write(req->ssl, ws_buffer, ws_len);
+        ret = SSL_write(req->ssl, ws_buffer, ws_len);
+        ESP_LOGD(REQ_TAG, "SSL_write returned with: %i", ret);
         free(ws_buffer);
         return len;
     }
-    return SSL_write(req->ssl, buffer, len);
+    ret = SSL_write(req->ssl, buffer, len);
+    ESP_LOGD(REQ_TAG, "SSL_write returned with: %i", ret);
+    return ret;
 }
 
 static int nossl_write(request_t *req, char *buffer, int len)
