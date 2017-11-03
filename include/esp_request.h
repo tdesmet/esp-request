@@ -84,6 +84,7 @@ typedef struct request_t {
     response_t *response;
     int is_websocket;
     int valid_websocket;
+    int is_open;
     REQ_PROTOCOL protocol;
 } request_t;
 

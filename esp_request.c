@@ -63,7 +63,7 @@ static int nossl_connect(request_t *req)
     }
 
     socket = socket(PF_INET, SOCK_STREAM, 0);
-    REQ_CHECK(socket < 0, "socket failed", return -1);
+    REQ_CHECK(socket < 0, "socket failed in nossl_connect", return -1);
 
     port = req_list_get_key(req->opt, "port");
     if(port == NULL)
@@ -88,12 +88,15 @@ static int nossl_connect(request_t *req)
         return -1;
     }
     req->socket = socket;
+    if(!req_list_check_key(req->opt, "secure", "true")) {
+    	req->is_open = 1;
+    }
     return socket;
 }
 static int ssl_connect(request_t *req)
 {
     nossl_connect(req);
-    REQ_CHECK(req->socket < 0, "socket failed", return -1);
+    REQ_CHECK(req->socket < 0, "socket failed in ssl_connect (?)", return -1);
     req_list_t *host;
     host = req_list_get_key(req->opt, "host");
 
@@ -103,6 +106,7 @@ static int ssl_connect(request_t *req)
     SSL_set_fd(req->ssl, req->socket);
     SSL_set_tlsext_host_name(req->ssl, host->value);
     ESP_LOGD(REQ_TAG, "ssl_connect done: %i", SSL_connect(req->ssl));
+    req->is_open = 1;
     return 0;
 }
 static char *ws_esc(char *buffer, int len, int *outlen)
@@ -232,16 +236,24 @@ static int nossl_read(request_t *req, char *buffer, int len)
 }
 static int ssl_close(request_t *req)
 {
-    SSL_shutdown(req->ssl);
-    SSL_free(req->ssl);
-    close(req->socket);
-    SSL_CTX_free(req->ctx);
+	if(!req->is_open) {
+		SSL_shutdown(req->ssl);
+		SSL_free(req->ssl);
+		close(req->socket);
+		SSL_CTX_free(req->ctx);
+		req->is_open = 0;
+	}
     return 0;
 }
 
 static int nossl_close(request_t *req)
 {
-    return close(req->socket);
+	int ret = -1;
+	if(!req->is_open) {
+		ret = close(req->socket);
+		req->is_open = 0;
+	}
+	return ret;
 }
 static int req_setopt_from_uri(request_t *req, const char* uri)
 {
@@ -668,7 +680,6 @@ void req_websocket_task(void *pv)
             }
 
         }
-
     }
     req->_close(req);
     if(req->websocket_callback) {
