@@ -63,7 +63,7 @@ static int nossl_connect(request_t *req)
     }
 
     socket = socket(PF_INET, SOCK_STREAM, 0);
-    REQ_CHECK(socket < 0, "socket failed in nossl_connect", return -1);
+    REQ_CHECK(socket < 0, "socket failed", return -1);
 
     port = req_list_get_key(req->opt, "port");
     if(port == NULL)
@@ -88,25 +88,18 @@ static int nossl_connect(request_t *req)
         return -1;
     }
     req->socket = socket;
-    if(!req_list_check_key(req->opt, "secure", "true")) {
-    	req->is_open = 1;
-    }
     return socket;
 }
 static int ssl_connect(request_t *req)
 {
     nossl_connect(req);
-    REQ_CHECK(req->socket < 0, "socket failed in ssl_connect (?)", return -1);
-    req_list_t *host;
-    host = req_list_get_key(req->opt, "host");
+    REQ_CHECK(req->socket < 0, "socket failed", return -1);
 
-    //FIXME: Add certificate validaton!
-    req->ctx = SSL_CTX_new(TLSv1_2_client_method());
+    //TODO: Check
+    req->ctx = SSL_CTX_new(TLSv1_1_client_method());
     req->ssl = SSL_new(req->ctx);
     SSL_set_fd(req->ssl, req->socket);
-    SSL_set_tlsext_host_name(req->ssl, host->value);
-    ESP_LOGD(REQ_TAG, "ssl_connect done: %i", SSL_connect(req->ssl));
-    req->is_open = 1;
+    SSL_connect(req->ssl);
     return 0;
 }
 static char *ws_esc(char *buffer, int len, int *outlen)
@@ -180,18 +173,14 @@ static int ws_unesc(unsigned char *ws_buffer, unsigned char *buffer, int len)
 
 static int ssl_write(request_t *req, char *buffer, int len)
 {
-	int ret;
     if(req->valid_websocket) {
         int ws_len = 0;
         char *ws_buffer = ws_esc(buffer, len, &ws_len);
-        ret = SSL_write(req->ssl, ws_buffer, ws_len);
-        ESP_LOGD(REQ_TAG, "SSL_write returned with: %i", ret);
+        SSL_write(req->ssl, ws_buffer, ws_len);
         free(ws_buffer);
         return len;
     }
-    ret = SSL_write(req->ssl, buffer, len);
-    ESP_LOGD(REQ_TAG, "SSL_write returned with: %i", ret);
-    return ret;
+    return SSL_write(req->ssl, buffer, len);
 }
 
 static int nossl_write(request_t *req, char *buffer, int len)
@@ -236,24 +225,16 @@ static int nossl_read(request_t *req, char *buffer, int len)
 }
 static int ssl_close(request_t *req)
 {
-	if(!req->is_open) {
-		SSL_shutdown(req->ssl);
-		SSL_free(req->ssl);
-		close(req->socket);
-		SSL_CTX_free(req->ctx);
-		req->is_open = 0;
-	}
+    SSL_shutdown(req->ssl);
+    SSL_free(req->ssl);
+    close(req->socket);
+    SSL_CTX_free(req->ctx);
     return 0;
 }
 
 static int nossl_close(request_t *req)
 {
-	int ret = -1;
-	if(!req->is_open) {
-		ret = close(req->socket);
-		req->is_open = 0;
-	}
-	return ret;
+    return close(req->socket);
 }
 static int req_setopt_from_uri(request_t *req, const char* uri)
 {
@@ -573,11 +554,28 @@ static char *req_readline(request_t *req)
     // ESP_LOGD(REQ_TAG, "next offset=%d", req->buffer->bytes_read);
     return ret;
 }
+static int req_read_chunk_length(request_t *req)
+{
+    char *cr;
+    if(req->buffer->bytes_read + 2 > req->buffer->bytes_write) {
+        return -1;
+    }
+    cr = strstr(req->buffer->data + req->buffer->bytes_read, "\r\n");
+    if(cr == NULL) {
+        return -1;
+    }
+    memset(cr, 0, 2);
+	char *str = req->buffer->data + req->buffer->bytes_read;
+	int chunk_length = (int)strtol(str, NULL, 16);
+    req->buffer->bytes_read += (cr - (req->buffer->data + req->buffer->bytes_read)) + 2;
+    // ESP_LOGD(REQ_TAG, "next offset=%d", req->buffer->bytes_read);
+    return chunk_length;
+}
 static int req_process_download(request_t *req)
 {
-    int process_header = 1, header_off = 0;
+    int process_header = 1, header_off = 0, chunked = 0, chunk_length;
     char *line;
-    req_list_t *content_len;
+    req_list_t *content_len, *transfer_encoding;
     req->response->status_code = -1;
     reset_buffer(req);
     req_list_clear(req->response->header);
@@ -641,24 +639,49 @@ static int req_process_download(request_t *req)
                 fill_buffer(req);
             }
 
-            req->buffer->bytes_read = req->buffer->bytes_write;
-            content_len = req_list_get_key(req->response->header, "Content-Length");
-            if(content_len) {
-                req->response->len = atoi(content_len->value);
-            }
-            if(req->response->len && req->download_callback && (req->buffer->bytes_write - header_off) != 0) {
-                if(req->download_callback(req, (void *)(req->buffer->data + header_off), req->buffer->bytes_write - header_off) < 0) break;
+            transfer_encoding = req_list_get_key(req->response->header, "Transfer-Encoding");
+			if (transfer_encoding && strcmp(transfer_encoding->value, "chunked") == 0) {
+				chunked = 1;
+			}
 
-                req->buffer->bytes_total += req->buffer->bytes_write - header_off;
-                if(req->buffer->bytes_total == req->response->len) {
-                    break;
-                }
-            }
-            header_off = 0;
-            if(req->response->len == 0) {
-                break;
-            }
+			if (chunked) {
+				if ((req->buffer->bytes_write - header_off) != 0) {
+					chunk_length = req_read_chunk_length(req);
+					ESP_LOGD(REQ_TAG, "chunk_length: %d", chunk_length);
+					if (chunk_length == 0) {
+						break;
+					} else if (chunk_length == -1) {
+						header_off = 0;
+						continue;
+					}
+					content_len += chunk_length;
+					if(req->download_callback) {
+						if(req->download_callback(req, (void *)(req->buffer->data + req->buffer->bytes_read), chunk_length) < 0) break;
 
+						req->buffer->bytes_total += req->buffer->bytes_write - header_off;
+					}
+					req->buffer->bytes_read += chunk_length + 2;
+				}
+				header_off = 0;
+			} else {
+            	req->buffer->bytes_read = req->buffer->bytes_write;
+				content_len = req_list_get_key(req->response->header, "Content-Length");
+				if(content_len) {
+					req->response->len = atoi(content_len->value);
+				}
+				if(req->response->len && req->download_callback && (req->buffer->bytes_write - header_off) != 0) {
+					if(req->download_callback(req, (void *)(req->buffer->data + header_off), req->buffer->bytes_write - header_off) < 0) break;
+
+					req->buffer->bytes_total += req->buffer->bytes_write - header_off;
+					if(req->buffer->bytes_total == req->response->len) {
+						break;
+					}
+				}
+				header_off = 0;
+				if(req->response->len == 0) {
+					break;
+				}
+			}
         }
 
     } while(req->buffer->at_eof == 0);
@@ -680,6 +703,7 @@ void req_websocket_task(void *pv)
             }
 
         }
+
     }
     req->_close(req);
     if(req->websocket_callback) {
