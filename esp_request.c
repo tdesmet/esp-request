@@ -94,11 +94,13 @@ static int ssl_connect(request_t *req)
 {
     nossl_connect(req);
     REQ_CHECK(req->socket < 0, "socket failed", return -1);
-
+    req_list_t *host;		
+    host = req_list_get_key(req->opt, "host");
     //TODO: Check
-    req->ctx = SSL_CTX_new(TLSv1_1_client_method());
+    req->ctx = SSL_CTX_new(TLSv1_2_client_method);
     req->ssl = SSL_new(req->ctx);
     SSL_set_fd(req->ssl, req->socket);
+    SSL_set_tlsext_host_name(req->ssl, host->value);
     SSL_connect(req->ssl);
     return 0;
 }
