@@ -47,7 +47,7 @@ static char *http_auth_basic_encode(const char *username, const char *password)
 
 static int nossl_connect(request_t *req)
 {
-    int socket;
+    int socketfd;
     struct sockaddr_in remote_ip;
     struct timeval tv;
     req_list_t *host, *port, *timeout;
@@ -62,8 +62,8 @@ static int nossl_connect(request_t *req)
         }
     }
 
-    socket = socket(PF_INET, SOCK_STREAM, 0);
-    REQ_CHECK(socket < 0, "socket failed", return -1);
+    socketfd = socket(PF_INET, SOCK_STREAM, 0);
+    REQ_CHECK(socketfd < 0, "socket failed", return -1);
 
     port = req_list_get_key(req->opt, "port");
     if(port == NULL)
@@ -78,28 +78,28 @@ static int nossl_connect(request_t *req)
         tv.tv_sec = atoi(timeout->value);
     }
     tv.tv_usec = 0;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(socketfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     ESP_LOGD(REQ_TAG, "[sock=%d],connecting to server IP:%s,Port:%s...",
-             socket, ipaddr_ntoa((const ip_addr_t*)&remote_ip.sin_addr.s_addr), (char*)port->value);
-    if(connect(socket, (struct sockaddr *)(&remote_ip), sizeof(struct sockaddr)) != 0) {
-        close(socket);
-        req->socket = -1;
+             socketfd, ipaddr_ntoa((const ip_addr_t*)&remote_ip.sin_addr.s_addr), (char*)port->value);
+    if(connect(socketfd, (struct sockaddr *)(&remote_ip), sizeof(struct sockaddr)) != 0) {
+        close(socketfd);
+        req->socketfd = -1;
         return -1;
     }
-    req->socket = socket;
-    return socket;
+    req->socketfd = socketfd;
+    return socketfd;
 }
 static int ssl_connect(request_t *req)
 {
     nossl_connect(req);
-    REQ_CHECK(req->socket < 0, "socket failed", return -1);
+    REQ_CHECK(req->socketfd < 0, "socket failed", return -1);
     req_list_t *host;		
     host = req_list_get_key(req->opt, "host");
     //TODO: Check
     req->ctx = SSL_CTX_new(TLSv1_2_client_method);
     req->ssl = SSL_new(req->ctx);
-    SSL_set_fd(req->ssl, req->socket);
+    SSL_set_fd(req->ssl, req->socketfd);
     SSL_set_tlsext_host_name(req->ssl, host->value);
     SSL_connect(req->ssl);
     return 0;
@@ -190,11 +190,11 @@ static int nossl_write(request_t *req, char *buffer, int len)
     if(req->valid_websocket) {
         int ws_len = 0;
         char *ws_buffer = ws_esc(buffer, len, &ws_len);
-        write(req->socket, ws_buffer, ws_len);
+        write(req->socketfd, ws_buffer, ws_len);
         free(ws_buffer);
         return len;
     }
-    return write(req->socket, buffer, len);
+    return write(req->socketfd, buffer, len);
 }
 
 static int ssl_read(request_t *req, char *buffer, int len)
@@ -217,11 +217,11 @@ static int nossl_read(request_t *req, char *buffer, int len)
     int ret = -1;
     if(req->valid_websocket) {
         unsigned char *ws_buffer = (unsigned char*) malloc(len + MAX_WEBSOCKET_HEADER_SIZE);
-        ret = read(req->socket, ws_buffer, len + MAX_WEBSOCKET_HEADER_SIZE);
+        ret = read(req->socketfd, ws_buffer, len + MAX_WEBSOCKET_HEADER_SIZE);
         ret = ws_unesc(ws_buffer, (unsigned char *)buffer, ret);
         free(ws_buffer);
     } else {
-        ret = read(req->socket, buffer, len);
+        ret = read(req->socketfd, buffer, len);
     }
     return ret;
 }
@@ -229,14 +229,14 @@ static int ssl_close(request_t *req)
 {
     SSL_shutdown(req->ssl);
     SSL_free(req->ssl);
-    close(req->socket);
+    close(req->socketfd);
     SSL_CTX_free(req->ctx);
     return 0;
 }
 
 static int nossl_close(request_t *req)
 {
-    return close(req->socket);
+    return close(req->socketfd);
 }
 static int req_setopt_from_uri(request_t *req, const char* uri)
 {
@@ -320,7 +320,7 @@ request_t *req_new(const char *uri)
     memset(req->response->header, 0, sizeof(req_list_t));
 
     req_setopt(req, REQ_SET_PROTOCOL, (void*)PROTOCOL_HTTP);
-    req->socket = -1;
+    req->socketfd = -1;
 
     req_setopt_from_uri(req, uri);
 
@@ -717,7 +717,7 @@ void req_websocket_task(void *pv)
 int req_perform(request_t *req)
 {
     do {
-        if(req->socket < 0) {
+        if(req->socketfd < 0) {
             REQ_CHECK(req->_connect(req) < 0, "Error connnect", break);
         }
         REQ_CHECK(req_process_upload(req) < 0, "Error send request", break);

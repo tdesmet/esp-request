@@ -73,7 +73,7 @@ typedef struct request_t {
     SSL *ssl;
     req_buffer_t *buffer;
     void *context;
-    int socket;
+    int socketfd;
     int (*_connect)(struct request_t *req);
     int (*_read)(struct request_t *req, char *buffer, int len);
     int (*_write)(struct request_t *req, char *buffer, int len);
