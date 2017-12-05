@@ -97,7 +97,7 @@ static int ssl_connect(request_t *req)
     req_list_t *host;		
     host = req_list_get_key(req->opt, "host");
     //TODO: Check
-    req->ctx = SSL_CTX_new(TLSv1_2_client_method);
+    req->ctx = SSL_CTX_new(TLSv1_2_client_method());
     req->ssl = SSL_new(req->ctx);
     SSL_set_fd(req->ssl, req->socketfd);
     SSL_set_tlsext_host_name(req->ssl, host->value);
